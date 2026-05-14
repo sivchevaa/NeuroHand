@@ -1,5 +1,11 @@
 import { useCallback } from 'react';
-import { StyleSheet, View, Text, Dimensions, TouchableOpacity } from 'react-native';
+import {
+  StyleSheet,
+  View,
+  Text,
+  TouchableOpacity,
+  type LayoutChangeEvent,
+} from 'react-native';
 import { useCameraPermissions } from 'expo-camera';
 import Animated, {
   useSharedValue,
@@ -12,8 +18,6 @@ import {
   type HandLandmark,
   type HandLandmarksPayload,
 } from '../../modules/hand-tracker';
-
-const { width: W, height: H } = Dimensions.get('window');
 
 // All 21 MediaPipe hand connections
 const CONNECTIONS: readonly [number, number][] = [
@@ -31,6 +35,11 @@ const EMPTY: HandLandmark[] = Array.from({ length: 21 }, () => ({
   x: 0, y: 0, confidence: 0,
 }));
 
+type OverlaySize = {
+  width: number;
+  height: number;
+};
+
 // ─── Animated SVG primitives ──────────────────────────────────────────────────
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
@@ -41,16 +50,29 @@ const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 function LandmarkDot({
   index,
   pts,
+  size,
 }: {
   index: number;
   pts: SharedValue<HandLandmark[]>;
+  size: SharedValue<OverlaySize>;
 }) {
   const isTip = FINGERTIP_SET.includes(index);
   const props = useAnimatedProps(() => {
     'worklet';
     const l = pts.value[index];
-    if (!l || l.confidence < 0.25) return { cx: -50, cy: -50, r: 0 };
-    return { cx: l.x * W, cy: l.y * H, r: isTip ? 7 : 4 };
+    const layout = size.value;
+    if (!l || l.confidence < 0.25 || layout.width <= 0 || layout.height <= 0) {
+      return { cx: -50, cy: -50, r: 0 };
+    }
+
+    // Native emits preview-normalized coordinates after camera orientation,
+    // selfie mirroring, and resizeAspectFill cropping are applied. Origin is
+    // the top-left of this measured view, so rendering is just x/y * layout.
+    return {
+      cx: l.x * layout.width,
+      cy: l.y * layout.height,
+      r: isTip ? 7 : 4,
+    };
   });
   return (
     <AnimatedCircle
@@ -62,10 +84,19 @@ function LandmarkDot({
 }
 
 // Single path element for every bone — one worklet, zero extra renders
-function SkeletonLines({ pts }: { pts: SharedValue<HandLandmark[]> }) {
+function SkeletonLines({
+  pts,
+  size,
+}: {
+  pts: SharedValue<HandLandmark[]>;
+  size: SharedValue<OverlaySize>;
+}) {
   const props = useAnimatedProps(() => {
     'worklet';
     const l = pts.value;
+    const layout = size.value;
+    if (layout.width <= 0 || layout.height <= 0) return { d: '' };
+
     let d = '';
     for (let i = 0; i < CONNECTIONS.length; i++) {
       const si = CONNECTIONS[i][0];
@@ -73,7 +104,7 @@ function SkeletonLines({ pts }: { pts: SharedValue<HandLandmark[]> }) {
       const s = l[si];
       const e = l[ei];
       if (s && e && s.confidence > 0.25 && e.confidence > 0.25) {
-        d += `M${s.x * W},${s.y * H}L${e.x * W},${e.y * H}`;
+        d += `M${s.x * layout.width},${s.y * layout.height}L${e.x * layout.width},${e.y * layout.height}`;
       }
     }
     return { d };
@@ -91,12 +122,18 @@ function SkeletonLines({ pts }: { pts: SharedValue<HandLandmark[]> }) {
   );
 }
 
-function SkeletonOverlay({ pts }: { pts: SharedValue<HandLandmark[]> }) {
+function SkeletonOverlay({
+  pts,
+  size,
+}: {
+  pts: SharedValue<HandLandmark[]>;
+  size: SharedValue<OverlaySize>;
+}) {
   return (
     <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
-      <SkeletonLines pts={pts} />
+      <SkeletonLines pts={pts} size={size} />
       {Array.from({ length: 21 }, (_, i) => (
-        <LandmarkDot key={i} index={i} pts={pts} />
+        <LandmarkDot key={i} index={i} pts={pts} size={size} />
       ))}
     </Svg>
   );
@@ -107,6 +144,7 @@ function SkeletonOverlay({ pts }: { pts: SharedValue<HandLandmark[]> }) {
 export default function HomeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const pts = useSharedValue<HandLandmark[]>(EMPTY);
+  const overlaySize = useSharedValue<OverlaySize>({ width: 0, height: 0 });
 
   const handleLandmarks = useCallback(
     (event: { nativeEvent: HandLandmarksPayload }) => {
@@ -115,6 +153,14 @@ export default function HomeScreen() {
       pts.value = detected && landmarks.length === 21 ? landmarks : EMPTY;
     },
     [pts],
+  );
+
+  const handleLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      const { width, height } = event.nativeEvent.layout;
+      overlaySize.value = { width, height };
+    },
+    [overlaySize],
   );
 
   if (!permission) {
@@ -133,12 +179,12 @@ export default function HomeScreen() {
   }
 
   return (
-    <View style={styles.container}>
+    <View style={styles.container} onLayout={handleLayout}>
       <HandTrackerView
         style={StyleSheet.absoluteFill}
         onHandLandmarks={handleLandmarks}
       />
-      <SkeletonOverlay pts={pts} />
+      <SkeletonOverlay pts={pts} size={overlaySize} />
       <View style={styles.badge}>
         <Text style={styles.badgeText}>Show your hand</Text>
       </View>
