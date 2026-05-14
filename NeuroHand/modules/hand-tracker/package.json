@@ -1,0 +1,7 @@
+{
+  "name": "hand-tracker",
+  "version": "1.0.0",
+  "description": "Hand tracking via Apple Vision VNDetectHumanHandPoseRequest",
+  "main": "./index.ts",
+  "private": true
+}
