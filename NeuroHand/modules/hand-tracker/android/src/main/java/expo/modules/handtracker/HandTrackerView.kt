@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.util.Log
 import android.view.Surface
+import android.view.View
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -33,6 +34,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 private const val TAG = "HandTrackerView"
+private const val USE_TEXTURE_COMPATIBLE_FALLBACK = false
 
 data class HandLandmarkEvent(
   @Field val detected: Boolean,
@@ -54,9 +56,22 @@ class HandTrackerView(
 
   private val previewView = PreviewView(context).apply {
     layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-    setBackgroundColor(Color.rgb(32, 32, 32))
-    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+    // Bright red is intentional while debugging Android composition. If red is
+    // not visible before CameraX draws, the native child view is not visible in
+    // the React Native/Expo hierarchy. If red is visible but camera is black,
+    // the issue is the CameraX PreviewView surface path.
+    setBackgroundColor(Color.RED)
+    implementationMode = if (USE_TEXTURE_COMPATIBLE_FALLBACK) {
+      PreviewView.ImplementationMode.COMPATIBLE
+    } else {
+      PreviewView.ImplementationMode.PERFORMANCE
+    }
     scaleType = PreviewView.ScaleType.FILL_CENTER
+    alpha = 1f
+    visibility = View.VISIBLE
+    z = 0f
+    translationZ = 0f
+    elevation = 0f
   }
 
   private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -76,15 +91,21 @@ class HandTrackerView(
   private var isCameraBound = false
 
   init {
-    setBackgroundColor(Color.BLACK)
+    setBackgroundColor(Color.TRANSPARENT)
+    clipChildren = false
+    clipToPadding = false
     addView(previewView)
-    Log.d(TAG, "PreviewView added to HandTrackerView. childCount=$childCount")
+    ensurePreviewViewVisible()
+    Log.d(TAG, "PreviewView added to HandTrackerView. childCount=$childCount mode=${previewView.implementationMode}")
+    logPreviewViewState("init")
     setupHandLandmarker()
   }
 
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
     Log.d(TAG, "HandTrackerView attached. view=${width}x$height preview=${previewView.width}x${previewView.height}")
+    ensurePreviewViewVisible()
+    logPreviewViewState("attached")
     post {
       startCameraIfPermitted()
     }
@@ -110,9 +131,10 @@ class HandTrackerView(
     val width = right - left
     val height = bottom - top
     previewView.layout(0, 0, width, height)
+    ensurePreviewViewVisible()
 
     if (changed) {
-      Log.d(TAG, "HandTrackerView laid out. view=${width}x$height preview=${previewView.width}x${previewView.height}")
+      logPreviewViewState("layout")
       if (isAttachedToWindow && !isCameraBound) {
         post {
           startCameraIfPermitted()
@@ -151,6 +173,8 @@ class HandTrackerView(
 
   private fun startCameraIfPermitted() {
     Log.d(TAG, "startCameraIfPermitted called. attached=$isAttachedToWindow size=${width}x$height preview=${previewView.width}x${previewView.height}")
+    ensurePreviewViewVisible()
+    logPreviewViewState("startCameraIfPermitted")
 
     if (isCameraBound) {
       Log.d(TAG, "CameraX is already bound; skipping duplicate start")
@@ -200,6 +224,8 @@ class HandTrackerView(
     val targetRotation = previewView.display?.rotation ?: display?.rotation ?: Surface.ROTATION_0
 
     try {
+      ensurePreviewViewVisible()
+      logPreviewViewState("bindCamera-before")
       Log.d(
         TAG,
         "Binding CameraX. targetRotation=$targetRotation previewSize=${previewView.width}x${previewView.height}"
@@ -229,6 +255,7 @@ class HandTrackerView(
       analysisUseCase = analysis
       isCameraBound = true
       Log.d(TAG, "CameraX bindToLifecycle succeeded")
+      logPreviewViewState("bindCamera-after")
     } catch (error: Throwable) {
       Log.e(TAG, "CameraX bindToLifecycle failed", error)
       isCameraBound = false
@@ -325,6 +352,34 @@ class HandTrackerView(
   private fun emitNoHand() {
     post {
       onHandLandmarks(HandLandmarkEvent(detected = false, landmarks = emptyList()))
+    }
+  }
+
+  private fun ensurePreviewViewVisible() {
+    previewView.visibility = View.VISIBLE
+    previewView.alpha = 1f
+    previewView.z = 0f
+    previewView.translationZ = 0f
+    previewView.elevation = 0f
+  }
+
+  private fun logPreviewViewState(stage: String) {
+    Log.d(
+      TAG,
+      "PreviewView state [$stage]: parent=${width}x$height preview=${previewView.width}x${previewView.height} " +
+        "measured=${previewView.measuredWidth}x${previewView.measuredHeight} " +
+        "attached=${previewView.isAttachedToWindow} visibility=${visibilityName(previewView.visibility)} " +
+        "alpha=${previewView.alpha} z=${previewView.z} translationZ=${previewView.translationZ} " +
+        "mode=${previewView.implementationMode}"
+    )
+  }
+
+  private fun visibilityName(visibility: Int): String {
+    return when (visibility) {
+      View.VISIBLE -> "VISIBLE"
+      View.INVISIBLE -> "INVISIBLE"
+      View.GONE -> "GONE"
+      else -> visibility.toString()
     }
   }
 
