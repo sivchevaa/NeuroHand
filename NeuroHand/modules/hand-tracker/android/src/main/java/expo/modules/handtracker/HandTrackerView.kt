@@ -4,7 +4,9 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.util.Log
+import android.view.Surface
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -52,6 +54,8 @@ class HandTrackerView(
 
   private val previewView = PreviewView(context).apply {
     layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+    setBackgroundColor(Color.rgb(32, 32, 32))
+    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
     scaleType = PreviewView.ScaleType.FILL_CENTER
   }
 
@@ -69,53 +73,94 @@ class HandTrackerView(
   private var latestImageWidth = 0
   private var latestImageHeight = 0
   private var latestImageRotation = 0
+  private var isCameraBound = false
 
   init {
+    setBackgroundColor(Color.BLACK)
     addView(previewView)
+    Log.d(TAG, "PreviewView added to HandTrackerView. childCount=$childCount")
     setupHandLandmarker()
   }
 
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
-    startCameraIfPermitted()
+    Log.d(TAG, "HandTrackerView attached. view=${width}x$height preview=${previewView.width}x${previewView.height}")
+    post {
+      startCameraIfPermitted()
+    }
   }
 
   override fun onDetachedFromWindow() {
+    Log.d(TAG, "HandTrackerView detached")
     stopCamera()
     super.onDetachedFromWindow()
   }
 
+  override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+    super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+
+    previewView.measure(
+      MeasureSpec.makeMeasureSpec(measuredWidth, MeasureSpec.EXACTLY),
+      MeasureSpec.makeMeasureSpec(measuredHeight, MeasureSpec.EXACTLY)
+    )
+  }
+
   override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
     super.onLayout(changed, left, top, right, bottom)
-    previewView.layout(0, 0, right - left, bottom - top)
+    val width = right - left
+    val height = bottom - top
+    previewView.layout(0, 0, width, height)
+
+    if (changed) {
+      Log.d(TAG, "HandTrackerView laid out. view=${width}x$height preview=${previewView.width}x${previewView.height}")
+      if (isAttachedToWindow && !isCameraBound) {
+        post {
+          startCameraIfPermitted()
+        }
+      }
+    }
   }
 
   private fun setupHandLandmarker() {
-    val baseOptions = BaseOptions.builder()
-      .setModelAssetPath("hand_landmarker.task")
-      .build()
+    try {
+      val baseOptions = BaseOptions.builder()
+        .setModelAssetPath("hand_landmarker.task")
+        .build()
 
-    val options = HandLandmarker.HandLandmarkerOptions.builder()
-      .setBaseOptions(baseOptions)
-      .setRunningMode(RunningMode.LIVE_STREAM)
-      .setNumHands(1)
-      .setMinHandDetectionConfidence(0.5f)
-      .setMinHandPresenceConfidence(0.5f)
-      .setMinTrackingConfidence(0.5f)
-      .setResultListener(::handleLandmarkerResult)
-      .setErrorListener { error ->
-        Log.e(TAG, "MediaPipe hand detection failed", error)
-        emitNoHand()
-      }
-      .build()
+      val options = HandLandmarker.HandLandmarkerOptions.builder()
+        .setBaseOptions(baseOptions)
+        .setRunningMode(RunningMode.LIVE_STREAM)
+        .setNumHands(1)
+        .setMinHandDetectionConfidence(0.5f)
+        .setMinHandPresenceConfidence(0.5f)
+        .setMinTrackingConfidence(0.5f)
+        .setResultListener(::handleLandmarkerResult)
+        .setErrorListener { error ->
+          Log.e(TAG, "MediaPipe hand detection failed", error)
+          emitNoHand()
+        }
+        .build()
 
-    handLandmarker = HandLandmarker.createFromOptions(context, options)
+      handLandmarker = HandLandmarker.createFromOptions(context, options)
+      Log.d(TAG, "MediaPipe HandLandmarker created")
+    } catch (error: Throwable) {
+      Log.e(TAG, "Failed to create MediaPipe HandLandmarker", error)
+      emitNoHand()
+    }
   }
 
   private fun startCameraIfPermitted() {
+    Log.d(TAG, "startCameraIfPermitted called. attached=$isAttachedToWindow size=${width}x$height preview=${previewView.width}x${previewView.height}")
+
+    if (isCameraBound) {
+      Log.d(TAG, "CameraX is already bound; skipping duplicate start")
+      return
+    }
+
     if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
       // The React screen already requests camera permission via expo-camera.
       // Native Android only starts CameraX after that permission is granted.
+      Log.w(TAG, "CAMERA permission is not granted; CameraX preview will not start")
       emitNoHand()
       return
     }
@@ -126,39 +171,69 @@ class HandTrackerView(
       return
     }
 
+    Log.d(TAG, "Requesting ProcessCameraProvider")
     val providerFuture = ProcessCameraProvider.getInstance(context)
     providerFuture.addListener({
-      cameraProvider = providerFuture.get()
-      bindCamera(lifecycleOwner)
+      try {
+        cameraProvider = providerFuture.get()
+        Log.d(TAG, "ProcessCameraProvider ready")
+        bindCamera(lifecycleOwner)
+      } catch (error: Throwable) {
+        Log.e(TAG, "Failed to obtain ProcessCameraProvider", error)
+        emitNoHand()
+      }
     }, ContextCompat.getMainExecutor(context))
   }
 
   private fun bindCamera(lifecycleOwner: LifecycleOwner) {
     val provider = cameraProvider ?: return
 
+    if (previewView.width <= 0 || previewView.height <= 0) {
+      Log.w(TAG, "PreviewView has no size yet; delaying CameraX bind")
+      previewView.post {
+        bindCamera(lifecycleOwner)
+      }
+      return
+    }
+
     val selector = CameraSelector.DEFAULT_FRONT_CAMERA
+    val targetRotation = previewView.display?.rotation ?: display?.rotation ?: Surface.ROTATION_0
 
-    val preview = Preview.Builder()
-      .setTargetRotation(previewView.display?.rotation ?: display.rotation)
-      .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
-      .build()
-      .also {
-        it.setSurfaceProvider(previewView.surfaceProvider)
-      }
+    try {
+      Log.d(
+        TAG,
+        "Binding CameraX. targetRotation=$targetRotation previewSize=${previewView.width}x${previewView.height}"
+      )
 
-    val analysis = ImageAnalysis.Builder()
-      .setTargetRotation(previewView.display?.rotation ?: display.rotation)
-      .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-      .build()
-      .also {
-        it.setAnalyzer(analysisExecutor, ::analyzeFrame)
-      }
+      val preview = Preview.Builder()
+        .setTargetRotation(targetRotation)
+        .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
+        .build()
+        .also {
+          Log.d(TAG, "Attaching Preview surface provider")
+          it.setSurfaceProvider(previewView.surfaceProvider)
+        }
 
-    provider.unbind(previewUseCase, analysisUseCase)
-    provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+      val analysis = ImageAnalysis.Builder()
+        .setTargetRotation(targetRotation)
+        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        .build()
+        .also {
+          it.setAnalyzer(analysisExecutor, ::analyzeFrame)
+        }
 
-    previewUseCase = preview
-    analysisUseCase = analysis
+      provider.unbind(previewUseCase, analysisUseCase)
+      provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+
+      previewUseCase = preview
+      analysisUseCase = analysis
+      isCameraBound = true
+      Log.d(TAG, "CameraX bindToLifecycle succeeded")
+    } catch (error: Throwable) {
+      Log.e(TAG, "CameraX bindToLifecycle failed", error)
+      isCameraBound = false
+      emitNoHand()
+    }
   }
 
   private fun analyzeFrame(imageProxy: ImageProxy) {
@@ -254,9 +329,11 @@ class HandTrackerView(
   }
 
   private fun stopCamera() {
+    Log.d(TAG, "Stopping CameraX")
     cameraProvider?.unbind(previewUseCase, analysisUseCase)
     previewUseCase = null
     analysisUseCase = null
+    isCameraBound = false
   }
 
   fun destroy() {
