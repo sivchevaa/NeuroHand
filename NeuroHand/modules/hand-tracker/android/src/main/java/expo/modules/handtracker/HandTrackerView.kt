@@ -88,6 +88,9 @@ class HandTrackerView(
   private var latestImageWidth = 0
   private var latestImageHeight = 0
   private var latestImageRotation = 0
+  private var hasRequestedCameraStart = false
+  private var isStartingCamera = false
+  private var isBindingCamera = false
   private var isCameraBound = false
 
   init {
@@ -135,10 +138,16 @@ class HandTrackerView(
 
     if (changed) {
       logPreviewViewState("layout")
-      if (isAttachedToWindow && !isCameraBound) {
+      if (isAttachedToWindow && width > 0 && height > 0 && !hasRequestedCameraStart && !isStartingCamera && !isCameraBound) {
         post {
           startCameraIfPermitted()
         }
+      } else if (isAttachedToWindow && !isCameraBound) {
+        Log.d(
+          TAG,
+          "Layout did not start CameraX. requested=$hasRequestedCameraStart starting=$isStartingCamera " +
+            "binding=$isBindingCamera bound=$isCameraBound size=${width}x$height"
+        )
       }
     }
   }
@@ -176,6 +185,20 @@ class HandTrackerView(
     ensurePreviewViewVisible()
     logPreviewViewState("startCameraIfPermitted")
 
+    if (hasRequestedCameraStart || isStartingCamera || isBindingCamera || isCameraBound) {
+      Log.d(
+        TAG,
+        "Skipping CameraX start. requested=$hasRequestedCameraStart starting=$isStartingCamera " +
+          "binding=$isBindingCamera bound=$isCameraBound"
+      )
+      return
+    }
+
+    if (previewView.width <= 0 || previewView.height <= 0) {
+      Log.d(TAG, "PreviewView has no size yet; waiting for layout before requesting ProcessCameraProvider")
+      return
+    }
+
     if (isCameraBound) {
       Log.d(TAG, "CameraX is already bound; skipping duplicate start")
       return
@@ -195,15 +218,20 @@ class HandTrackerView(
       return
     }
 
+    hasRequestedCameraStart = true
+    isStartingCamera = true
     Log.d(TAG, "Requesting ProcessCameraProvider")
     val providerFuture = ProcessCameraProvider.getInstance(context)
     providerFuture.addListener({
       try {
         cameraProvider = providerFuture.get()
         Log.d(TAG, "ProcessCameraProvider ready")
+        isStartingCamera = false
         bindCamera(lifecycleOwner)
       } catch (error: Throwable) {
         Log.e(TAG, "Failed to obtain ProcessCameraProvider", error)
+        hasRequestedCameraStart = false
+        isStartingCamera = false
         emitNoHand()
       }
     }, ContextCompat.getMainExecutor(context))
@@ -211,6 +239,11 @@ class HandTrackerView(
 
   private fun bindCamera(lifecycleOwner: LifecycleOwner) {
     val provider = cameraProvider ?: return
+
+    if (isCameraBound || isBindingCamera) {
+      Log.d(TAG, "Skipping CameraX bind. binding=$isBindingCamera bound=$isCameraBound")
+      return
+    }
 
     if (previewView.width <= 0 || previewView.height <= 0) {
       Log.w(TAG, "PreviewView has no size yet; delaying CameraX bind")
@@ -224,6 +257,7 @@ class HandTrackerView(
     val targetRotation = previewView.display?.rotation ?: display?.rotation ?: Surface.ROTATION_0
 
     try {
+      isBindingCamera = true
       ensurePreviewViewVisible()
       logPreviewViewState("bindCamera-before")
 
@@ -273,12 +307,14 @@ class HandTrackerView(
           it.setAnalyzer(analysisExecutor, ::analyzeFrame)
         }
 
-      provider.unbind(previewUseCase, analysisUseCase)
+      Log.d(TAG, "Unbinding existing CameraX use cases before single clean bind")
+      provider.unbindAll()
       val camera = provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
 
       previewUseCase = preview
       analysisUseCase = analysis
       isCameraBound = true
+      isBindingCamera = false
       Log.d(TAG, "CameraX bindToLifecycle succeeded. boundLensFacing=${lensFacingName(camera.cameraInfo.lensFacing)}")
       camera.cameraInfo.cameraState.observe(lifecycleOwner) { cameraState ->
         Log.d(TAG, "Camera state changed: type=${cameraState.type} error=${cameraState.error}")
@@ -289,6 +325,9 @@ class HandTrackerView(
       logPreviewViewState("bindCamera-after")
     } catch (error: Throwable) {
       Log.e(TAG, "CameraX bindToLifecycle failed", error)
+      hasRequestedCameraStart = false
+      isStartingCamera = false
+      isBindingCamera = false
       isCameraBound = false
       emitNoHand()
     }
@@ -425,9 +464,12 @@ class HandTrackerView(
 
   private fun stopCamera() {
     Log.d(TAG, "Stopping CameraX")
-    cameraProvider?.unbind(previewUseCase, analysisUseCase)
+    cameraProvider?.unbindAll()
     previewUseCase = null
     analysisUseCase = null
+    hasRequestedCameraStart = false
+    isStartingCamera = false
+    isBindingCamera = false
     isCameraBound = false
   }
 
