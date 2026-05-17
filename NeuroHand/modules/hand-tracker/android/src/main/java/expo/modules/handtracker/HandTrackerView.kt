@@ -34,7 +34,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 private const val TAG = "HandTrackerView"
-private const val USE_TEXTURE_COMPATIBLE_FALLBACK = false
+private const val USE_COMPATIBLE_PREVIEW_MODE = true
 
 data class HandLandmarkEvent(
   @Field val detected: Boolean,
@@ -61,7 +61,7 @@ class HandTrackerView(
     // the React Native/Expo hierarchy. If red is visible but camera is black,
     // the issue is the CameraX PreviewView surface path.
     setBackgroundColor(Color.RED)
-    implementationMode = if (USE_TEXTURE_COMPATIBLE_FALLBACK) {
+    implementationMode = if (USE_COMPATIBLE_PREVIEW_MODE) {
       PreviewView.ImplementationMode.COMPATIBLE
     } else {
       PreviewView.ImplementationMode.PERFORMANCE
@@ -226,18 +226,43 @@ class HandTrackerView(
     try {
       ensurePreviewViewVisible()
       logPreviewViewState("bindCamera-before")
+
+      val availableCameraInfos = provider.availableCameraInfos
+      val frontCameraInfos = selector.filter(availableCameraInfos)
+      val hasFrontCamera = provider.hasCamera(selector)
+      Log.d(
+        TAG,
+        "CameraX cameras: available=${availableCameraInfos.size} frontMatches=${frontCameraInfos.size} " +
+          "hasFrontCamera=$hasFrontCamera selectedLensFacing=${lensFacingName(CameraSelector.LENS_FACING_FRONT)}"
+      )
+      frontCameraInfos.forEachIndexed { index, cameraInfo ->
+        Log.d(TAG, "Front camera candidate #$index lensFacing=${lensFacingName(cameraInfo.lensFacing)}")
+      }
+
       Log.d(
         TAG,
         "Binding CameraX. targetRotation=$targetRotation previewSize=${previewView.width}x${previewView.height}"
       )
 
+      val previewSurfaceProvider = previewView.surfaceProvider
       val preview = Preview.Builder()
         .setTargetRotation(targetRotation)
         .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
         .build()
         .also {
-          Log.d(TAG, "Attaching Preview surface provider")
-          it.setSurfaceProvider(previewView.surfaceProvider)
+          Log.d(
+            TAG,
+            "Attaching Preview surface provider after attach=${previewView.isAttachedToWindow} " +
+              "previewSize=${previewView.width}x${previewView.height} mode=${previewView.implementationMode}"
+          )
+          it.setSurfaceProvider { surfaceRequest ->
+            Log.d(
+              TAG,
+              "Surface requested by Preview. resolution=${surfaceRequest.resolution} " +
+                "attached=${previewView.isAttachedToWindow} visibility=${visibilityName(previewView.visibility)}"
+            )
+            previewSurfaceProvider.onSurfaceRequested(surfaceRequest)
+          }
         }
 
       val analysis = ImageAnalysis.Builder()
@@ -249,12 +274,18 @@ class HandTrackerView(
         }
 
       provider.unbind(previewUseCase, analysisUseCase)
-      provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+      val camera = provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
 
       previewUseCase = preview
       analysisUseCase = analysis
       isCameraBound = true
-      Log.d(TAG, "CameraX bindToLifecycle succeeded")
+      Log.d(TAG, "CameraX bindToLifecycle succeeded. boundLensFacing=${lensFacingName(camera.cameraInfo.lensFacing)}")
+      camera.cameraInfo.cameraState.observe(lifecycleOwner) { cameraState ->
+        Log.d(TAG, "Camera state changed: type=${cameraState.type} error=${cameraState.error}")
+      }
+      previewView.previewStreamState.observe(lifecycleOwner) { streamState ->
+        Log.d(TAG, "Preview stream state changed: $streamState")
+      }
       logPreviewViewState("bindCamera-after")
     } catch (error: Throwable) {
       Log.e(TAG, "CameraX bindToLifecycle failed", error)
@@ -380,6 +411,15 @@ class HandTrackerView(
       View.INVISIBLE -> "INVISIBLE"
       View.GONE -> "GONE"
       else -> visibility.toString()
+    }
+  }
+
+  private fun lensFacingName(lensFacing: Int?): String {
+    return when (lensFacing) {
+      CameraSelector.LENS_FACING_FRONT -> "FRONT"
+      CameraSelector.LENS_FACING_BACK -> "BACK"
+      null -> "UNKNOWN"
+      else -> lensFacing.toString()
     }
   }
 
