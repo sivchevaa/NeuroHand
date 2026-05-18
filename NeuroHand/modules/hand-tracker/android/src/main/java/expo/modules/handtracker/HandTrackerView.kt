@@ -35,6 +35,7 @@ import java.util.concurrent.Executors
 
 private const val TAG = "HandTrackerView"
 private const val USE_COMPATIBLE_PREVIEW_MODE = true
+private const val ENABLE_IMAGE_ANALYSIS = false
 
 data class HandLandmarkEvent(
   @Field val detected: Boolean,
@@ -299,17 +300,27 @@ class HandTrackerView(
           }
         }
 
-      val analysis = ImageAnalysis.Builder()
-        .setTargetRotation(targetRotation)
-        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-        .build()
-        .also {
-          it.setAnalyzer(analysisExecutor, ::analyzeFrame)
-        }
+      val analysis = if (ENABLE_IMAGE_ANALYSIS) {
+        ImageAnalysis.Builder()
+          .setTargetRotation(targetRotation)
+          .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+          .build()
+          .also {
+            it.setAnalyzer(analysisExecutor, ::analyzeFrame)
+          }
+      } else {
+        null
+      }
 
       Log.d(TAG, "Unbinding existing CameraX use cases before single clean bind")
       provider.unbindAll()
-      val camera = provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+      val camera = if (analysis != null) {
+        Log.d(TAG, "Binding CameraX use cases: Preview + ImageAnalysis")
+        provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+      } else {
+        Log.d(TAG, "Binding CameraX use cases: Preview only")
+        provider.bindToLifecycle(lifecycleOwner, selector, preview)
+      }
 
       previewUseCase = preview
       analysisUseCase = analysis
