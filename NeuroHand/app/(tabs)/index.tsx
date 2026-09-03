@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   StyleSheet,
   View,
@@ -10,14 +10,21 @@ import { useCameraPermissions } from 'expo-camera';
 import Animated, {
   useSharedValue,
   useAnimatedProps,
+  useAnimatedStyle,
+  withTiming,
+  withRepeat,
+  withSequence,
+  cancelAnimation,
   type SharedValue,
 } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path, Circle } from 'react-native-svg';
 import {
   HandTrackerView,
   type HandLandmark,
   type HandLandmarksPayload,
 } from '../../modules/hand-tracker';
+import { useTrackingQuality } from '../../utils/trackingQuality';
 
 // All 21 MediaPipe hand connections
 const CONNECTIONS: readonly [number, number][] = [
@@ -145,14 +152,22 @@ export default function HomeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const pts = useSharedValue<HandLandmark[]>(EMPTY);
   const overlaySize = useSharedValue<OverlaySize>({ width: 0, height: 0 });
+  const insets = useSafeAreaInsets();
+  const { status: trackingStatus, reportFrame } = useTrackingQuality();
+  const [handDetected, setHandDetected] = useState(false);
+  const badgePulse = useSharedValue(1);
 
   const handleLandmarks = useCallback(
     (event: { nativeEvent: HandLandmarksPayload }) => {
-      const { detected, landmarks } = event.nativeEvent;
+      const payload = event.nativeEvent;
+      const { detected, landmarks } = payload;
       // Direct shared value assignment — schedules UI-thread update, no re-render
       pts.value = detected && landmarks.length === 21 ? landmarks : EMPTY;
+
+      reportFrame(payload);
+      setHandDetected((prev) => (prev === detected ? prev : detected));
     },
-    [pts],
+    [pts, reportFrame],
   );
 
   const handleLayout = useCallback(
@@ -162,6 +177,27 @@ export default function HomeScreen() {
     },
     [overlaySize],
   );
+
+  useEffect(() => {
+    if (handDetected) {
+      cancelAnimation(badgePulse);
+      badgePulse.value = withTiming(1, { duration: 150 });
+    } else {
+      badgePulse.value = withRepeat(
+        withSequence(
+          withTiming(0.5, { duration: 900 }),
+          withTiming(1, { duration: 900 }),
+        ),
+        -1,
+        true,
+      );
+    }
+    return () => cancelAnimation(badgePulse);
+  }, [handDetected, badgePulse]);
+
+  const badgeAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: badgePulse.value,
+  }));
 
   if (!permission) {
     return <View style={styles.container} />;
@@ -185,9 +221,18 @@ export default function HomeScreen() {
         onHandLandmarks={handleLandmarks}
       />
       <SkeletonOverlay pts={pts} size={overlaySize} />
-      <View style={styles.badge}>
-        <Text style={styles.badgeText}>Show your hand</Text>
-      </View>
+      {trackingStatus === 'poor' && (
+        <View style={[styles.banner, { paddingTop: insets.top + 8 }]}>
+          <Text style={styles.bannerText}>
+            Tracking is unstable — try better lighting or move your hand closer
+          </Text>
+        </View>
+      )}
+      <Animated.View style={[styles.badge, badgeAnimatedStyle]}>
+        <Text style={[styles.badgeText, handDetected && styles.badgeTextDetected]}>
+          {handDetected ? 'Hand detected' : 'Show your hand'}
+        </Text>
+      </Animated.View>
     </View>
   );
 }
@@ -209,6 +254,24 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
     borderRadius: 20,
     overflow: 'hidden',
+  },
+  badgeTextDetected: {
+    backgroundColor: 'rgba(0,180,90,0.85)',
+  },
+  banner: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+  },
+  bannerText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '500',
+    textAlign: 'center',
   },
   permText: { color: '#fff', fontSize: 17, marginBottom: 20, textAlign: 'center' },
   permBtn: {
