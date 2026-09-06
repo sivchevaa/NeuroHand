@@ -6,6 +6,10 @@ public class HandTrackerModule: Module {
 
     View(HandTrackerView.self) {
       Events("onHandLandmarks")
+
+      AsyncFunction("takeSnapshot") { (view: HandTrackerView) -> String in
+        try await view.takeSnapshot()
+      }
     }
   }
 }

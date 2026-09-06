@@ -7,6 +7,8 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 import { useCameraPermissions } from 'expo-camera';
+import { useIsFocused } from '@react-navigation/native';
+import { useRouter } from 'expo-router';
 import Animated, {
   useSharedValue,
   useAnimatedProps,
@@ -25,6 +27,7 @@ import {
   type HandLandmarksPayload,
 } from '../../modules/hand-tracker';
 import { useTrackingQuality } from '../../utils/trackingQuality';
+import { isCalibrated } from '../../utils/calibration';
 
 // All 21 MediaPipe hand connections
 const CONNECTIONS: readonly [number, number][] = [
@@ -149,6 +152,8 @@ function SkeletonOverlay({
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
 export default function HomeScreen() {
+  const router = useRouter();
+  const isFocused = useIsFocused();
   const [permission, requestPermission] = useCameraPermissions();
   const pts = useSharedValue<HandLandmark[]>(EMPTY);
   const overlaySize = useSharedValue<OverlaySize>({ width: 0, height: 0 });
@@ -156,6 +161,24 @@ export default function HomeScreen() {
   const { status: trackingStatus, reportFrame } = useTrackingQuality();
   const [handDetected, setHandDetected] = useState(false);
   const badgePulse = useSharedValue(1);
+  // null = not yet checked, to avoid flashing either control before the
+  // first check resolves.
+  const [calibrated, setCalibrated] = useState<boolean | null>(null);
+  const [calibratePromptDismissed, setCalibratePromptDismissed] = useState(false);
+
+  // Re-checks on every focus (not just mount) so returning from the
+  // calibration screen — first-time or a repeat recalibration — immediately
+  // reflects the just-stored result, instead of only updating on next app launch.
+  useEffect(() => {
+    if (!isFocused) return;
+    let cancelled = false;
+    isCalibrated().then((result) => {
+      if (!cancelled) setCalibrated(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isFocused]);
 
   const handleLandmarks = useCallback(
     (event: { nativeEvent: HandLandmarksPayload }) => {
@@ -216,10 +239,16 @@ export default function HomeScreen() {
 
   return (
     <View style={styles.container} onLayout={handleLayout}>
-      <HandTrackerView
-        style={StyleSheet.absoluteFill}
-        onHandLandmarks={handleLandmarks}
-      />
+      {/* calibration.tsx lives in the same Tabs navigator, which keeps blurred
+          tabs mounted — without this guard the camera session here never
+          releases the device, so calibration's own session silently fails
+          to start. */}
+      {isFocused && (
+        <HandTrackerView
+          style={StyleSheet.absoluteFill}
+          onHandLandmarks={handleLandmarks}
+        />
+      )}
       <SkeletonOverlay pts={pts} size={overlaySize} />
       {trackingStatus === 'poor' && (
         <View style={[styles.banner, { paddingTop: insets.top + 8 }]}>
@@ -227,6 +256,29 @@ export default function HomeScreen() {
             Tracking is unstable — try better lighting or move your hand closer
           </Text>
         </View>
+      )}
+      {calibrated === false && !calibratePromptDismissed && (
+        <View style={styles.calibratePrompt}>
+          <Text style={styles.calibratePromptText}>
+            Calibrate for accurate measurements
+          </Text>
+          <View style={styles.calibratePromptActions}>
+            <TouchableOpacity onPress={() => router.push('/calibration')}>
+              <Text style={styles.calibrateLink}>Calibrate</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setCalibratePromptDismissed(true)}>
+              <Text style={styles.dismissLink}>Dismiss</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+      {calibrated === true && (
+        <TouchableOpacity
+          style={styles.recalibrateButton}
+          onPress={() => router.push('/calibration')}
+        >
+          <Text style={styles.recalibrateText}>Recalibrate</Text>
+        </TouchableOpacity>
       )}
       <Animated.View style={[styles.badge, badgeAnimatedStyle]}>
         <Text style={[styles.badgeText, handDetected && styles.badgeTextDetected]}>
@@ -272,6 +324,50 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     textAlign: 'center',
+  },
+  calibratePrompt: {
+    position: 'absolute',
+    bottom: 96,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    maxWidth: '86%',
+    alignItems: 'center',
+  },
+  calibratePromptText: {
+    color: '#fff',
+    fontSize: 13,
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  calibratePromptActions: {
+    flexDirection: 'row',
+    gap: 16,
+  },
+  calibrateLink: {
+    color: '#00FF88',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  dismissLink: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 13,
+  },
+  recalibrateButton: {
+    position: 'absolute',
+    bottom: 96,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+  },
+  recalibrateText: {
+    color: 'rgba(0,255,136,0.85)',
+    fontSize: 11,
+    fontWeight: '600',
   },
   permText: { color: '#fff', fontSize: 17, marginBottom: 20, textAlign: 'center' },
   permBtn: {
